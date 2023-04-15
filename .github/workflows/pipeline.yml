@@ -8,101 +8,63 @@ on:
       - main
 
 jobs:
-  UnitTest:
+  Build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v2
+      - name: Download do Repositório
+        uses: actions/checkout@v3       # https://github.com/actions/checkout
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4   # https://github.com/actions/setup-python
         with:
           python-version: '3.10'
 
       - name: Install Requirements
-        run:  pip install flask
+        run:  pip install flask pytest pytest-cov flask-wtf
 
       - name: Unit Test
-        run: python -m unittest -v test
-
-  SonarCloud:
-      name: SonarCloud
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v2
-          with:
-            fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-        - name: SonarCloud Scan
-          uses: SonarSource/sonarcloud-github-action@master
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information, if any
-            SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  Build:
-      needs: [UnitTest,SonarCloud ]
-      name: Build
-      runs-on: ubuntu-latest
-      steps: 
-
-      - name: Checkout Repo
-        uses: actions/checkout@v2
-
-      - name: New Relic License
         run: |
-          sed -i "s/licensekey/${{ secrets.NEW_RELIC_LICENSE_KEY }}/g" Dockerfile
+          coverage run --source=app -m pytest test.py
+          coverage report -m
+          coverage xml -i
 
-      - name: Login to Heroku Container registry
-        env: 
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: heroku container:login
-
-      - name: Docker Image & Push Heroku Registry
+      - name: SonarCloud Scan
+        uses: sonarsource/sonarcloud-github-action@master  #https://github.com/marketplace/actions/sonarcloud-scan
         env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: heroku container:push -a ${{ secrets.HEROKU_APP_NAME }} web
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  
 
       - name: Docker Login
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: | 
           echo '${{ secrets.GOOGLE_CREDENTIALS }}' > key.json
-          cat key.json | docker login -u _json_key --password-stdin https://us-central1-docker.pkg.dev/
+          cat key.json | docker login -u _json_key --password-stdin '${{ vars.GOOGLE_ARTIFACT }}'
 
-      - name: Build Image & Push
-        env: 
-          ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}
+      - name: Build & Push Image
         run: | 
-          docker build -t ${{ secrets.ARTIFACT_REGISTRY }}/myapp:latest .
-          docker push ${{ secrets.ARTIFACT_REGISTRY }}/myapp:latest
+          docker build -t ${{ vars.GOOGLE_ARTIFACT }}/${{ vars.GOOGLE_PROJECT_ID }}/${{ vars.GOOGLE_REPONAME }}/${{ vars.GOOGLE_MYAPP }}:latest .
+          docker push ${{ vars.GOOGLE_ARTIFACT }}/${{ vars.GOOGLE_PROJECT_ID }}/${{ vars.GOOGLE_REPONAME }}/${{ vars.GOOGLE_MYAPP }}:latest
 
-  Deploy:
+  Deploy-Homolog:
     needs: Build
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3 # https://github.com/actions/checkout
 
-      - name: Deploy Heroku
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: heroku container:release -a ${{ secrets.HEROKU_APP_NAME }} web
-
-      - name: Auth GCP AppEngine
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        uses: 'google-github-actions/auth@v0'
+      - name: Auth GCP
+        uses: 'google-github-actions/auth@v1' # https://github.com/google-github-actions/auth
         with:
           credentials_json: '${{ secrets.GOOGLE_CREDENTIALS }}'
 
-      - name: Deploy to App Engine
-        id: appengine
-        env: 
-          ARTIFACT_REGISTRY: ${{ secrets.ARTIFACT_REGISTRY }}
-        uses: 'google-github-actions/deploy-appengine@v0'
+      - name: Cloud Run Deploy - Homolog
+        id: homolog-deploy
+        uses: 'google-github-actions/deploy-cloudrun@v1'  # https://github.com/marketplace/actions/deploy-to-cloud-run
         with:
-          image_url: ${{ secrets.ARTIFACT_REGISTRY }}/myapp:latest
+          service: ${{ vars.GOOGLE_MYAPP }}-homolog
+          image:   ${{ vars.GOOGLE_ARTIFACT }}/${{ vars.GOOGLE_PROJECT_ID }}/${{ vars.GOOGLE_REPONAME }}/${{ vars.GOOGLE_MYAPP }}:latest
+          flags: '--allow-unauthenticated'
 
-      - name: Prod Test
-        run: 'curl "${{ steps.appengine.outputs.url }}"'
+      - name: Test Homolog
+        run: 'curl "${{ steps.homolog-deploy.outputs.url }}"'
